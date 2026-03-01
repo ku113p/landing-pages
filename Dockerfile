@@ -1,4 +1,4 @@
-ARG RUST_VERSION=1.79.0
+ARG RUST_VERSION=1.88.0
 ARG APP_NAME=landing-pages
 
 FROM rust:${RUST_VERSION}-alpine AS build
