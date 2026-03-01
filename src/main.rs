@@ -1,9 +1,8 @@
-use axum::{extract::{Path, State}, http::{header, StatusCode}, response::IntoResponse, routing::{get, post}, Router, Json};
+use axum::{extract::{Path, Query, State}, http::{header, HeaderMap, StatusCode}, response::IntoResponse, routing::{get, post}, Router, Json};
 use redis::{AsyncCommands, RedisResult};
 use std::{env, sync::Arc};
-use http::HeaderMap;
-use tracing::{info, error, Level};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use tracing::{info, error, warn, Level};
 
 pub struct AppState {
     pub redis_client: redis::Client,
@@ -20,8 +19,13 @@ async fn main() {
     let redis_client = redis::Client::open(redis_url).unwrap();
     let app_state = AppState { redis_client };
 
+    if env::var("AUTH_TOKEN").is_err() {
+        warn!("AUTH_TOKEN not set - admin endpoints are unprotected");
+    }
+
     let router = Router::new()
         .route("/p/:path", get(get_page))
+        .route("/pages", get(list_pages))
         .route("/create_page/:path", post(create_page))
         .with_state(Arc::new(app_state));
 
@@ -36,30 +40,86 @@ async fn main() {
     axum::serve(listener, router.into_make_service()).await.unwrap();
 }
 
+fn check_auth(headers: &HeaderMap) -> Result<(), StatusCode> {
+    let token = match env::var("AUTH_TOKEN") {
+        Ok(t) => t,
+        Err(_) => return Ok(()),
+    };
+    let raw = headers.get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let provided = raw.strip_prefix("Bearer ").unwrap_or(raw);
+    if token != provided { return Err(StatusCode::UNAUTHORIZED); }
+    Ok(())
+}
+
 #[derive(Serialize)]
 struct CreatePageResponse {
-    success: bool
+    success: bool,
+}
+
+#[derive(Deserialize)]
+struct CreatePageQuery {
+    name: Option<String>,
 }
 
 async fn create_page(
     Path(path): Path<String>,
+    Query(query): Query<CreatePageQuery>,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<CreatePageResponse>, StatusCode> {
-    let auth_token = env::var("AUTH_TOKEN").map_err(|_| StatusCode::UNAUTHORIZED)?;
-    let req_auth_token = headers.get("Authorization").and_then(|v| v.to_str().ok()).ok_or(StatusCode::UNAUTHORIZED)?;
-    if auth_token != req_auth_token {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
+    check_auth(&headers)?;
 
     let mut redis_conn = redis_connection(&state.redis_client).await.map_err(|e| log_err("redis_connection", e))?;
 
-    let page_key =  format!("page:{}", path);
+    let page_key = format!("page:{}", path);
     redis_conn.hset(&page_key, "html", body.to_vec()).await.map_err(|e| log_err("0", e))?;
+    redis_conn.hset(&page_key, "name", query.name.unwrap_or_default()).await.map_err(|e| log_err("2", e))?;
     redis_conn.expire(&page_key, 60 * 60 * 24 * 30).await.map_err(|e| log_err("1", e))?;
 
     Ok(Json(CreatePageResponse { success: true }))
+}
+
+#[derive(Serialize)]
+struct PageInfo {
+    path: String,
+    name: String,
+}
+
+async fn list_pages(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<PageInfo>>, StatusCode> {
+    check_auth(&headers)?;
+
+    let mut redis_conn = redis_connection(&state.redis_client).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut pages = Vec::new();
+    let mut cursor: u64 = 0;
+
+    loop {
+        let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg("page:*")
+            .arg("COUNT")
+            .arg(100)
+            .query_async(&mut redis_conn)
+            .await
+            .map_err(|e| log_err("scan", e))?;
+
+        for key in keys {
+            let name: String = redis_conn.hget(&key, "name").await.unwrap_or_default();
+            let path = key.strip_prefix("page:").unwrap_or(&key).to_string();
+            pages.push(PageInfo { path, name });
+        }
+
+        cursor = next_cursor;
+        if cursor == 0 { break; }
+    }
+
+    Ok(Json(pages))
 }
 
 async fn redis_connection(redis_client: &redis::Client) -> RedisResult<redis::aio::MultiplexedConnection> {

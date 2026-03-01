@@ -44,7 +44,7 @@ Creates or updates an HTML page at the given `path`. Requires a valid `Authoriza
 
 ## Environment Variables
 
-- `REDIS_URL`: URL for connecting to the Redis instance. Defaults to `redis://127.0.0.1/`.
+- `REDIS_URL`: URL for connecting to the Redis instance. Defaults to `redis://127.0.0.1/`. Use `redis://:PASSWORD@host/` format when Redis auth is enabled.
 - `AUTH_TOKEN`: Token used to authenticate requests to the `POST /create_page/:path` endpoint.
 - `HOST`: The host the service will bind to. Defaults to `127.0.0.1`.
 - `PORT`: The port the service will bind to. Defaults to `3000`.
