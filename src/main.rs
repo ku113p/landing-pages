@@ -4,6 +4,10 @@ use std::{env, sync::Arc};
 use serde::{Deserialize, Serialize};
 use tracing::{info, error, warn, Level};
 
+async fn ping() -> &'static str {
+    "pong"
+}
+
 pub struct AppState {
     pub redis_client: redis::Client,
 }
@@ -24,6 +28,7 @@ async fn main() {
     }
 
     let router = Router::new()
+        .route("/ping", get(ping))
         .route("/p/:path", get(get_page))
         .route("/pages", get(list_pages))
         .route("/create_page/:path", post(create_page))
